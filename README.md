@@ -22,8 +22,8 @@ set without changing the workflow file.
 The manually triggered GitHub Actions workflow:
 
 1. updates Homebrew;
-2. builds any missing runtime dependencies from source and exposes the runner's
-   Go or Rust toolchain to Homebrew's sandbox when required;
+2. builds any missing dependencies from source and exposes the runner's Go or
+   Rust toolchain to Homebrew's isolated build environment when required;
 3. builds every requested formula from source with `--build-bottle` in a
    separate matrix job;
 4. runs the formula test;

@@ -52,18 +52,25 @@ jobs:
           unset HOMEBREW_NO_AUTO_UPDATE
           brew update
 
-      - name: Prepare runtime dependencies and runner toolchains
+      - name: Prepare dependencies and runner toolchains
         run: |
           set -euo pipefail
 
           while IFS= read -r dependency; do
+            case "$dependency" in
+              go|rust)
+                continue
+                ;;
+            esac
+
             if ! brew list --versions "$dependency" >/dev/null 2>&1; then
-              echo "=== Building missing runtime dependency: $dependency ==="
+              echo "=== Building missing dependency: $dependency ==="
               brew install --build-from-source "$dependency"
             fi
           done < <(
             brew info --json=v2 --formula "$FORMULA" |
-              jq -r '.formulae[0].dependencies[]'
+              jq -r '(.formulae[0].dependencies + .formulae[0].build_dependencies)[]' |
+              sort -u
           )
 
           case "$FORMULA" in
@@ -84,6 +91,33 @@ jobs:
               ;;
           esac
 
+          formula_installer="$(brew --repository)/Library/Homebrew/formula_installer.rb"
+          ruby -e '
+            path = ARGV.fetch(0)
+            source = File.read(path)
+            old = "if ((pour_bottle? && !DevelopmentTools.installed?) || build_bottle?) &&\n"
+            replacement = "if (pour_bottle? && !DevelopmentTools.installed?) &&\n"
+            patched = source.sub(old, replacement)
+            abort "Unable to patch the unbottled dependency check" if patched == source
+            File.write(path, patched)
+          ' "$formula_installer"
+
+          if [[ -d /private/tmp/intel-brew-toolchain/bin ]]; then
+            superenv="$(brew --repository)/Library/Homebrew/extend/ENV/super.rb"
+            ruby -e '
+              path = ARGV.fetch(0)
+              source = File.read(path)
+              old = "    path = PATH.new(Superenv.bin)\n"
+              replacement = <<~RUBY
+                    path = PATH.new(Superenv.bin)
+                    path.append("/private/tmp/intel-brew-toolchain/bin")
+              RUBY
+              patched = source.sub(old, replacement)
+              abort "Unable to add the runner toolchain to Superenv" if patched == source
+              File.write(path, patched)
+            ' "$superenv"
+          fi
+
       - name: Build ${{ matrix.formula }} from source
         run: |
           set -euo pipefail
@@ -98,42 +132,17 @@ jobs:
               "$FORMULA"
           )"
 
-          set --
-          while IFS= read -r dependency; do
-            set -- "$@" "$dependency"
-          done < <(
-            brew info --json=v2 --formula "$FORMULA" |
-              jq -r '(.formulae[0].dependencies + .formulae[0].build_dependencies)[]' |
-              sort -u
-          )
-
           ruby -e '
             path = ARGV.fetch(0)
-            dependencies = ARGV.drop(1)
             source = File.read(path)
-            setup = <<~RUBY
-                  toolchain = Pathname("/private/tmp/intel-brew-toolchain/bin")
-                  ENV.prepend_path "PATH", toolchain if toolchain.directory?
-            RUBY
-            dependencies.each do |name|
-              setup << <<~RUBY
-                  dependency = Formula[#{name.inspect}]
-                  ENV.prepend_path "PATH", dependency.opt_bin if dependency.opt_bin.directory?
-                  ENV.prepend_path "PKG_CONFIG_PATH", dependency.opt_lib/"pkgconfig"
-                  ENV.prepend_path "PKG_CONFIG_PATH", dependency.opt_share/"pkgconfig"
-                  ENV.prepend_path "CMAKE_PREFIX_PATH", dependency.opt_prefix
-                  ENV.prepend "CPPFLAGS", "-I\#{dependency.opt_include}" if dependency.opt_include.directory?
-                  ENV.prepend "LDFLAGS", "-L\#{dependency.opt_lib}" if dependency.opt_lib.directory?
-              RUBY
+            if Pathname("/private/tmp/intel-brew-toolchain/bin").directory?
+              source = source.gsub(/^  depends_on "(?:go|rust)" => :build\n/, "")
             end
-            patched = source.sub(/^  def install\n/, "\\0#{setup}")
-            abort "Unable to inject the dependency build environment" if patched == source
-            File.write(path, patched)
-          ' "$formula_file" "$@"
+            File.write(path, source)
+          ' "$formula_file"
 
           HOMEBREW_DEVELOPER=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew install \
             --build-bottle \
-            --ignore-dependencies \
             "$FORMULA"
           brew test "$FORMULA"
 
