@@ -1,0 +1,138 @@
+name: Build Intel Homebrew Bottle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-tree-intel-bottle
+  cancel-in-progress: false
+
+env:
+  FORMULA: tree
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+jobs:
+  build:
+    name: Build tree for Intel macOS 15
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+
+    steps:
+      - name: Show runner environment
+        run: |
+          echo "=== Architecture ==="
+          uname -m
+
+          echo "=== macOS ==="
+          sw_vers
+
+          echo "=== Homebrew ==="
+          brew --version
+
+          echo "=== Homebrew Config ==="
+          brew config
+
+      - name: Update Homebrew
+        run: |
+          unset HOMEBREW_NO_AUTO_UPDATE
+          brew update
+
+      - name: Build tree from source
+        run: |
+          set -euo pipefail
+
+          if brew list --formula "$FORMULA" >/dev/null 2>&1; then
+            brew uninstall --force --ignore-dependencies --formula "$FORMULA"
+          fi
+
+          brew install --build-bottle "$FORMULA"
+          brew test "$FORMULA"
+
+      - name: Create bottle
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          cd dist
+
+          brew bottle --json "$FORMULA"
+
+          echo "=== Generated files ==="
+          ls -lah
+
+      - name: Validate generated files
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          bottles=(dist/*.bottle.tar.gz)
+          metadata=(dist/*.json)
+
+          if [[ ${#bottles[@]} -ne 1 ]]; then
+            echo "Expected exactly one bottle, found ${#bottles[@]}" >&2
+            exit 1
+          fi
+
+          if [[ ${#metadata[@]} -ne 1 ]]; then
+            echo "Expected exactly one bottle JSON file, found ${#metadata[@]}" >&2
+            exit 1
+          fi
+
+          FORMULA_VERSION="$(brew list --versions "$FORMULA" | awk '{print $2}')"
+          if [[ -z "$FORMULA_VERSION" ]]; then
+            echo "Unable to determine the installed formula version" >&2
+            exit 1
+          fi
+
+          echo "FORMULA_VERSION=$FORMULA_VERSION" >> "$GITHUB_ENV"
+
+          echo "=== SHA256 ==="
+          (
+            cd dist
+            shasum -a 256 ./*.bottle.tar.gz > SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+
+          echo "=== JSON ==="
+          ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0)))' "${metadata[0]}"
+          cat "${metadata[0]}"
+
+      - name: Reinstall and test generated bottle
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          bottles=(dist/*.bottle.tar.gz)
+          if [[ ${#bottles[@]} -ne 1 ]]; then
+            echo "Expected exactly one bottle, found ${#bottles[@]}" >&2
+            exit 1
+          fi
+
+          brew uninstall --force --ignore-dependencies --formula "$FORMULA"
+          brew install "${bottles[0]}"
+          brew test "$FORMULA"
+          "$FORMULA" --version
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="${FORMULA}-${FORMULA_VERSION}-x86_64-sequoia-build.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          NOTES="Formula: ${FORMULA}
+          Version: ${FORMULA_VERSION}
+          Platform: Intel x86_64 macOS 15 Sequoia
+          Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          gh release create "$TAG" \
+            dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "${FORMULA} ${FORMULA_VERSION} - Intel macOS 15 bottle" \
+            --notes "$NOTES" \
+            --latest=false
