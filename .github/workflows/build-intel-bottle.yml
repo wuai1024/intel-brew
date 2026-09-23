@@ -72,13 +72,13 @@ jobs:
                 brew install --build-from-source go
               fi
               go_root="$(go env GOROOT)"
-              portable_go="/private/tmp/intel-brew-go"
+              portable_go="/private/tmp/intel-brew-toolchain"
               ditto "$go_root" "$portable_go"
               echo "$portable_go/bin" >> "$GITHUB_PATH"
               ;;
             redis|uv)
               rust_root="$(rustc --print sysroot)"
-              portable_rust="/private/tmp/intel-brew-rust"
+              portable_rust="/private/tmp/intel-brew-toolchain"
               ditto "$rust_root" "$portable_rust"
               echo "$portable_rust/bin" >> "$GITHUB_PATH"
               ;;
@@ -92,20 +92,49 @@ jobs:
             brew uninstall --force --ignore-dependencies --formula "$FORMULA"
           fi
 
-          formula_file="/private/tmp/${FORMULA}.rb"
-          brew cat "$FORMULA" > "$formula_file"
+          formula_file="$(
+            HOMEBREW_NO_INSTALL_FROM_API=1 brew ruby -e \
+              'puts Formulary.factory(ARGV.fetch(0)).path' \
+              "$FORMULA"
+          )"
+
+          set --
+          while IFS= read -r dependency; do
+            set -- "$@" "$dependency"
+          done < <(
+            brew info --json=v2 --formula "$FORMULA" |
+              jq -r '(.formulae[0].dependencies + .formulae[0].build_dependencies)[]' |
+              sort -u
+          )
+
           ruby -e '
             path = ARGV.fetch(0)
+            dependencies = ARGV.drop(1)
             source = File.read(path)
-            patched = source.sub(/^class .* < Formula\n/, "\\0  env :std\n")
-            abort "Unable to enable the standard build environment" if patched == source
+            setup = <<~RUBY
+                  toolchain = Pathname("/private/tmp/intel-brew-toolchain/bin")
+                  ENV.prepend_path "PATH", toolchain if toolchain.directory?
+            RUBY
+            dependencies.each do |name|
+              setup << <<~RUBY
+                  dependency = Formula[#{name.inspect}]
+                  ENV.prepend_path "PATH", dependency.opt_bin if dependency.opt_bin.directory?
+                  ENV.prepend_path "PKG_CONFIG_PATH", dependency.opt_lib/"pkgconfig"
+                  ENV.prepend_path "PKG_CONFIG_PATH", dependency.opt_share/"pkgconfig"
+                  ENV.prepend_path "CMAKE_PREFIX_PATH", dependency.opt_prefix
+                  ENV.prepend "CPPFLAGS", "-I\#{dependency.opt_include}" if dependency.opt_include.directory?
+                  ENV.prepend "LDFLAGS", "-L\#{dependency.opt_lib}" if dependency.opt_lib.directory?
+              RUBY
+            end
+            patched = source.sub(/^  def install\n/, "\\0#{setup}")
+            abort "Unable to inject the dependency build environment" if patched == source
             File.write(path, patched)
-          ' "$formula_file"
+          ' "$formula_file" "$@"
 
-          HOMEBREW_DEVELOPER=1 brew install \
+          HOMEBREW_DEVELOPER=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew install \
             --build-bottle \
             --ignore-dependencies \
-            "$formula_file"
+            "$FORMULA"
           brew test "$FORMULA"
 
       - name: Create bottle
