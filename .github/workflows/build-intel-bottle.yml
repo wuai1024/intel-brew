@@ -68,6 +68,9 @@ jobs:
 
           case "$FORMULA" in
             aliyun-cli)
+              if ! command -v go >/dev/null 2>&1; then
+                brew install --build-from-source go
+              fi
               go_root="$(go env GOROOT)"
               portable_go="/private/tmp/intel-brew-go"
               ditto "$go_root" "$portable_go"
