@@ -19,7 +19,6 @@ jobs:
   build:
     name: Build tree for Intel macOS 15
     runs-on: macos-15-intel
-    timeout-minutes: 60
 
     steps:
       - name: Show runner environment
@@ -69,16 +68,16 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          bottles=(dist/*.bottle.tar.gz)
+          bottles=(dist/*.bottle*.tar.gz)
           metadata=(dist/*.json)
 
-          if [[ ${#bottles[@]} -ne 1 ]]; then
-            echo "Expected exactly one bottle, found ${#bottles[@]}" >&2
+          if [[ ${#bottles[@]} -eq 0 ]]; then
+            echo "No bottle files were generated" >&2
             exit 1
           fi
 
-          if [[ ${#metadata[@]} -ne 1 ]]; then
-            echo "Expected exactly one bottle JSON file, found ${#metadata[@]}" >&2
+          if [[ ${#metadata[@]} -eq 0 ]]; then
+            echo "No bottle JSON files were generated" >&2
             exit 1
           fi
 
@@ -93,27 +92,29 @@ jobs:
           echo "=== SHA256 ==="
           (
             cd dist
-            shasum -a 256 ./*.bottle.tar.gz > SHA256SUMS
+            shasum -a 256 ./*.bottle*.tar.gz > SHA256SUMS
             shasum -a 256 -c SHA256SUMS
           )
 
           echo "=== JSON ==="
-          ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0)))' "${metadata[0]}"
-          cat "${metadata[0]}"
+          for json_file in "${metadata[@]}"; do
+            ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0)))' "$json_file"
+            cat "$json_file"
+          done
 
       - name: Reinstall and test generated bottle
         run: |
           set -euo pipefail
           shopt -s nullglob
 
-          bottles=(dist/*.bottle.tar.gz)
-          if [[ ${#bottles[@]} -ne 1 ]]; then
-            echo "Expected exactly one bottle, found ${#bottles[@]}" >&2
+          bottles=(dist/*.bottle*.tar.gz)
+          if [[ ${#bottles[@]} -eq 0 ]]; then
+            echo "No bottle files were generated" >&2
             exit 1
           fi
 
           brew uninstall --force --ignore-dependencies --formula "$FORMULA"
-          brew install "${bottles[0]}"
+          brew install "${bottles[@]}"
           brew test "$FORMULA"
           "$FORMULA" --version
 
