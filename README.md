@@ -29,7 +29,7 @@ Download the `.bottle.tar.gz` file and `SHA256SUMS` from the same
 
 ```bash
 shasum -a 256 -c SHA256SUMS
-brew install ./tree--*.bottle*.tar.gz
+HOMEBREW_DEVELOPER=1 brew install ./tree--*.bottle*.tar.gz
 ```
 
 This repository is currently a bottle build and release project, not a
