@@ -68,7 +68,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          bottles=(dist/*.bottle*.tar.gz)
+          bottles=("$GITHUB_WORKSPACE"/dist/*.bottle*.tar.gz)
           metadata=(dist/*.json)
 
           if [[ ${#bottles[@]} -eq 0 ]]; then
@@ -107,7 +107,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          bottles=(dist/*.bottle*.tar.gz)
+          bottles=("$GITHUB_WORKSPACE"/dist/*.bottle*.tar.gz)
           if [[ ${#bottles[@]} -eq 0 ]]; then
             echo "No bottle files were generated" >&2
             exit 1
