@@ -2,23 +2,34 @@ name: Build Intel Homebrew Bottle
 
 on:
   workflow_dispatch:
+    inputs:
+      formulae:
+        description: JSON array of Homebrew formulae to build
+        required: true
+        default: '["aliyun-cli","redis","rsync","uv","wget"]'
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-tree-intel-bottle
+  group: build-intel-bottles-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  FORMULA: tree
   HOMEBREW_NO_AUTO_UPDATE: "1"
   HOMEBREW_NO_INSTALL_CLEANUP: "1"
 
 jobs:
   build:
-    name: Build tree for Intel macOS 15
+    name: Build ${{ matrix.formula }} for Intel macOS 15
     runs-on: macos-15-intel
+    strategy:
+      fail-fast: false
+      matrix:
+        formula: ${{ fromJSON(inputs.formulae) }}
+    env:
+      FORMULA: ${{ matrix.formula }}
 
     steps:
       - name: Show runner environment
@@ -40,7 +51,7 @@ jobs:
           unset HOMEBREW_NO_AUTO_UPDATE
           brew update
 
-      - name: Build tree from source
+      - name: Build ${{ matrix.formula }} from source
         run: |
           set -euo pipefail
 
@@ -118,7 +129,7 @@ jobs:
           brew uninstall --force --ignore-dependencies --formula "$FORMULA"
           brew install "${bottles[@]}"
           brew test "$FORMULA"
-          "$FORMULA" --version
+          brew list --versions "$FORMULA"
 
       - name: Create GitHub Release
         env:
