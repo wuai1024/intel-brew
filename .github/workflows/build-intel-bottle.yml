@@ -56,28 +56,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          runtime_dependencies=()
           while IFS= read -r dependency; do
-            runtime_dependencies+=("$dependency")
+            if ! brew list --versions "$dependency" >/dev/null 2>&1; then
+              echo "=== Building missing runtime dependency: $dependency ==="
+              brew install --build-from-source "$dependency"
+            fi
           done < <(
             brew info --json=v2 --formula "$FORMULA" |
               jq -r '.formulae[0].dependencies[]'
           )
-
-          missing_dependencies=()
-          for dependency in "${runtime_dependencies[@]}"; do
-            if ! brew list --versions "$dependency" >/dev/null 2>&1; then
-              missing_dependencies+=("$dependency")
-            fi
-          done
-
-          if [[ ${#missing_dependencies[@]} -gt 0 ]]; then
-            echo "=== Building missing runtime dependencies ==="
-            printf '%s\n' "${missing_dependencies[@]}"
-            brew install --build-from-source "${missing_dependencies[@]}"
-          else
-            echo "All runtime dependencies are already installed"
-          fi
 
           case "$FORMULA" in
             aliyun-cli)
@@ -102,7 +89,21 @@ jobs:
             brew uninstall --force --ignore-dependencies --formula "$FORMULA"
           fi
 
-          brew install --env=std --build-bottle --ignore-dependencies "$FORMULA"
+          formula_slug="${FORMULA//@/-}"
+          formula_file="/private/tmp/intel-brew-${formula_slug}.rb"
+          brew cat "$FORMULA" > "$formula_file"
+          ruby -e '
+            path = ARGV.fetch(0)
+            source = File.read(path)
+            patched = source.sub(/^class .* < Formula\n/, "\\0  env :std\n")
+            abort "Unable to enable the standard build environment" if patched == source
+            File.write(path, patched)
+          ' "$formula_file"
+
+          HOMEBREW_DEVELOPER=1 brew install \
+            --build-bottle \
+            --ignore-dependencies \
+            "$formula_file"
           brew test "$FORMULA"
 
       - name: Create bottle
