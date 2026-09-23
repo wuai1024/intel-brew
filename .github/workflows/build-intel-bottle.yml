@@ -89,8 +89,7 @@ jobs:
             brew uninstall --force --ignore-dependencies --formula "$FORMULA"
           fi
 
-          formula_slug="${FORMULA//@/-}"
-          formula_file="/private/tmp/intel-brew-${formula_slug}.rb"
+          formula_file="/private/tmp/${FORMULA}.rb"
           brew cat "$FORMULA" > "$formula_file"
           ruby -e '
             path = ARGV.fetch(0)
