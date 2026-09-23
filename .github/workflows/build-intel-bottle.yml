@@ -6,7 +6,7 @@ on:
       formulae:
         description: JSON array of Homebrew formulae to build
         required: true
-        default: '["aliyun-cli","redis","rsync","uv","wget"]'
+        default: '["aliyun-cli","mysql@8.4","openjdk","redis","rsync","uv","wget"]'
         type: string
 
 permissions:
@@ -52,6 +52,48 @@ jobs:
           unset HOMEBREW_NO_AUTO_UPDATE
           brew update
 
+      - name: Prepare runtime dependencies and runner toolchains
+        run: |
+          set -euo pipefail
+
+          runtime_dependencies=()
+          while IFS= read -r dependency; do
+            runtime_dependencies+=("$dependency")
+          done < <(
+            brew info --json=v2 --formula "$FORMULA" |
+              jq -r '.formulae[0].dependencies[]'
+          )
+
+          missing_dependencies=()
+          for dependency in "${runtime_dependencies[@]}"; do
+            if ! brew list --versions "$dependency" >/dev/null 2>&1; then
+              missing_dependencies+=("$dependency")
+            fi
+          done
+
+          if [[ ${#missing_dependencies[@]} -gt 0 ]]; then
+            echo "=== Building missing runtime dependencies ==="
+            printf '%s\n' "${missing_dependencies[@]}"
+            brew install --build-from-source "${missing_dependencies[@]}"
+          else
+            echo "All runtime dependencies are already installed"
+          fi
+
+          case "$FORMULA" in
+            aliyun-cli)
+              go_root="$(go env GOROOT)"
+              portable_go="/private/tmp/intel-brew-go"
+              ditto "$go_root" "$portable_go"
+              echo "$portable_go/bin" >> "$GITHUB_PATH"
+              ;;
+            redis|uv)
+              rust_root="$(rustc --print sysroot)"
+              portable_rust="/private/tmp/intel-brew-rust"
+              ditto "$rust_root" "$portable_rust"
+              echo "$portable_rust/bin" >> "$GITHUB_PATH"
+              ;;
+          esac
+
       - name: Build ${{ matrix.formula }} from source
         run: |
           set -euo pipefail
@@ -60,7 +102,7 @@ jobs:
             brew uninstall --force --ignore-dependencies --formula "$FORMULA"
           fi
 
-          brew install --build-bottle --ignore-dependencies "$FORMULA"
+          brew install --env=std --build-bottle --ignore-dependencies "$FORMULA"
           brew test "$FORMULA"
 
       - name: Create bottle

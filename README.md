@@ -7,6 +7,8 @@ The default build list contains locally used formulae that are outdated and do
 not currently have an official Intel bottle:
 
 - `aliyun-cli`
+- `mysql@8.4`
+- `openjdk`
 - `redis`
 - `rsync`
 - `uv`
@@ -20,13 +22,15 @@ set without changing the workflow file.
 The manually triggered GitHub Actions workflow:
 
 1. updates Homebrew;
-2. builds every requested formula from source with `--build-bottle` in a
+2. builds any missing runtime dependencies from source and exposes the runner's
+   Go or Rust toolchain to Homebrew's sandbox when required;
+3. builds every requested formula from source with `--build-bottle` in a
    separate matrix job;
-3. runs the formula test;
-4. creates the bottle and its JSON metadata;
-5. verifies the generated files and writes `SHA256SUMS`;
-6. uninstalls the source build, reinstalls the generated bottle, and tests it;
-7. publishes one verified GitHub Release per formula, tied to the workflow
+4. runs the formula test;
+5. creates the bottle and its JSON metadata;
+6. verifies the generated files and writes `SHA256SUMS`;
+7. uninstalls the source build, reinstalls the generated bottle, and tests it;
+8. publishes one verified GitHub Release per formula, tied to the workflow
    commit.
 
 Release tags include the formula version, platform, workflow run number, and
