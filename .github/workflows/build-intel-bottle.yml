@@ -144,6 +144,11 @@ jobs:
           HOMEBREW_DEVELOPER=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew install \
             --build-bottle \
             "$FORMULA"
+
+          if [[ "$FORMULA" == "redis" ]]; then
+            chmod +x "$(brew --prefix "$FORMULA")"/lib/redis/modules/*.so
+          fi
+
           brew test "$FORMULA"
 
       - name: Create bottle
