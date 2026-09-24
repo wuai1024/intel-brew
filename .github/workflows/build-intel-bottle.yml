@@ -17,6 +17,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  HOMEBREW_CURL_RETRIES: "10"
+  HOMEBREW_DOWNLOAD_CONCURRENCY: "1"
   HOMEBREW_NO_AUTO_UPDATE: "1"
   HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
   HOMEBREW_NO_INSTALL_CLEANUP: "1"
@@ -142,12 +144,35 @@ jobs:
             source = File.read(path)
             source = source.gsub(/^  depends_on "go" => :build\n/, "") if File.directory?("/private/tmp/intel-brew-go/bin")
             source = source.gsub(/^  depends_on "rust" => :build\n/, "") if File.directory?("/private/tmp/intel-brew-rust/bin")
+            if File.basename(path) == "ruby.rb"
+              old = %q("#{versioned_opt_prefix}/lib/libruby.#{version.major_minor}.dylib")
+              replacement = %q("#{opt_prefix}/lib/libruby.#{version.major_minor}.dylib")
+              patched = source.sub(old, replacement)
+              abort "Unable to patch the Ruby opt-prefix test" if patched == source
+              source = patched
+            end
             File.write(path, source)
           ' "$formula_file"
 
-          HOMEBREW_DEVELOPER=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew install \
-            --build-bottle \
-            "$FORMULA"
+          build_succeeded=false
+          for attempt in 1 2 3; do
+            if HOMEBREW_DEVELOPER=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew install \
+              --build-bottle \
+              "$FORMULA"; then
+              build_succeeded=true
+              break
+            fi
+
+            if [[ "$attempt" -lt 3 ]]; then
+              echo "Build attempt $attempt failed; retrying the complete install" >&2
+              sleep "$((attempt * 15))"
+            fi
+          done
+
+          if [[ "$build_succeeded" != true ]]; then
+            echo "Unable to build $FORMULA after 3 attempts" >&2
+            exit 1
+          fi
 
           if [[ "$FORMULA" == "redis" ]]; then
             chmod +x "$(brew --prefix "$FORMULA")"/lib/redis/modules/*.so
