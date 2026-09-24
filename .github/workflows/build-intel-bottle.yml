@@ -232,10 +232,27 @@ jobs:
           Platform: Intel x86_64 macOS 15 Sequoia
           Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-          gh release create "$TAG" \
-            dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "${FORMULA} ${FORMULA_VERSION} - Intel macOS 15 bottle" \
-            --notes "$NOTES" \
-            --latest=false
+          for attempt in 1 2 3 4 5; do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              if gh release upload "$TAG" dist/* \
+                --repo "$GITHUB_REPOSITORY" \
+                --clobber; then
+                exit 0
+              fi
+            elif gh release create "$TAG" \
+              dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "${FORMULA} ${FORMULA_VERSION} - Intel macOS 15 bottle" \
+              --notes "$NOTES" \
+              --latest=false; then
+              exit 0
+            fi
+
+            if [[ "$attempt" -eq 5 ]]; then
+              echo "Unable to create or update release after $attempt attempts" >&2
+              exit 1
+            fi
+
+            sleep "$((attempt * 15))"
+          done
