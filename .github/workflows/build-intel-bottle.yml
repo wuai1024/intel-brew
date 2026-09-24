@@ -135,7 +135,7 @@ jobs:
           ruby -e '
             path = ARGV.fetch(0)
             source = File.read(path)
-            if Pathname("/private/tmp/intel-brew-toolchain/bin").directory?
+            if File.directory?("/private/tmp/intel-brew-toolchain/bin")
               source = source.gsub(/^  depends_on "(?:go|rust)" => :build\n/, "")
             end
             File.write(path, source)
