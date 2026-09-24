@@ -7,12 +7,19 @@ The default build list contains locally used formulae that are outdated and do
 not currently have an official Intel bottle:
 
 - `aliyun-cli`
+- `ffmpeg`
+- `fribidi`
+- `libslirp`
 - `mysql@8.4`
 - `openjdk`
 - `redis`
 - `rsync`
+- `ruby`
+- `rust`
+- `snappy`
 - `uv`
 - `wget`
+- `xxhash`
 
 The workflow input accepts a JSON array, so a manual run can build a different
 set without changing the workflow file.

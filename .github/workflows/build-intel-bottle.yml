@@ -6,7 +6,7 @@ on:
       formulae:
         description: JSON array of Homebrew formulae to build
         required: true
-        default: '["aliyun-cli","mysql@8.4","openjdk","redis","rsync","uv","wget"]'
+        default: '["aliyun-cli","ffmpeg","fribidi","libslirp","mysql@8.4","openjdk","redis","rsync","ruby","rust","snappy","uv","wget","xxhash"]'
         type: string
 
 permissions:
@@ -56,6 +56,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          formula_dependencies="$({
+            brew info --json=v2 --formula "$FORMULA" |
+              jq -r '(.formulae[0].dependencies + .formulae[0].build_dependencies)[]' |
+              sort -u
+          })"
+
           while IFS= read -r dependency; do
             case "$dependency" in
               go|rust)
@@ -67,29 +73,27 @@ jobs:
               echo "=== Building missing dependency: $dependency ==="
               brew install --build-from-source "$dependency"
             fi
-          done < <(
-            brew info --json=v2 --formula "$FORMULA" |
-              jq -r '(.formulae[0].dependencies + .formulae[0].build_dependencies)[]' |
-              sort -u
-          )
+          done <<< "$formula_dependencies"
 
-          case "$FORMULA" in
-            aliyun-cli)
-              if ! command -v go >/dev/null 2>&1; then
-                brew install --build-from-source go
-              fi
-              go_root="$(go env GOROOT)"
-              portable_go="/private/tmp/intel-brew-toolchain"
-              ditto "$go_root" "$portable_go"
-              echo "$portable_go/bin" >> "$GITHUB_PATH"
-              ;;
-            redis|uv)
-              rust_root="$(rustc --print sysroot)"
-              portable_rust="/private/tmp/intel-brew-toolchain"
-              ditto "$rust_root" "$portable_rust"
-              echo "$portable_rust/bin" >> "$GITHUB_PATH"
-              ;;
-          esac
+          if grep -qx 'go' <<< "$formula_dependencies"; then
+            if ! command -v go >/dev/null 2>&1; then
+              brew install --build-from-source go
+            fi
+            go_root="$(go env GOROOT)"
+            portable_go="/private/tmp/intel-brew-go"
+            ditto "$go_root" "$portable_go"
+            echo "$portable_go/bin" >> "$GITHUB_PATH"
+          fi
+
+          if grep -qx 'rust' <<< "$formula_dependencies"; then
+            if ! command -v rustc >/dev/null 2>&1; then
+              brew install --build-from-source rust
+            fi
+            rust_root="$(rustc --print sysroot)"
+            portable_rust="/private/tmp/intel-brew-rust"
+            ditto "$rust_root" "$portable_rust"
+            echo "$portable_rust/bin" >> "$GITHUB_PATH"
+          fi
 
           formula_installer="$(brew --repository)/Library/Homebrew/formula_installer.rb"
           ruby -e '
@@ -102,7 +106,7 @@ jobs:
             File.write(path, patched)
           ' "$formula_installer"
 
-          if [[ -d /private/tmp/intel-brew-toolchain/bin ]]; then
+          if [[ -d /private/tmp/intel-brew-go/bin || -d /private/tmp/intel-brew-rust/bin ]]; then
             superenv="$(brew --repository)/Library/Homebrew/extend/ENV/super.rb"
             ruby -e '
               path = ARGV.fetch(0)
@@ -110,7 +114,8 @@ jobs:
               old = "    path = PATH.new(Superenv.bin)\n"
               replacement = <<~RUBY
                     path = PATH.new(Superenv.bin)
-                    path.append("/private/tmp/intel-brew-toolchain/bin")
+                    path.append("/private/tmp/intel-brew-go/bin") if File.directory?("/private/tmp/intel-brew-go/bin")
+                    path.append("/private/tmp/intel-brew-rust/bin") if File.directory?("/private/tmp/intel-brew-rust/bin")
               RUBY
               patched = source.sub(old, replacement)
               abort "Unable to add the runner toolchain to Superenv" if patched == source
@@ -135,9 +140,8 @@ jobs:
           ruby -e '
             path = ARGV.fetch(0)
             source = File.read(path)
-            if File.directory?("/private/tmp/intel-brew-toolchain/bin")
-              source = source.gsub(/^  depends_on "(?:go|rust)" => :build\n/, "")
-            end
+            source = source.gsub(/^  depends_on "go" => :build\n/, "") if File.directory?("/private/tmp/intel-brew-go/bin")
+            source = source.gsub(/^  depends_on "rust" => :build\n/, "") if File.directory?("/private/tmp/intel-brew-rust/bin")
             File.write(path, source)
           ' "$formula_file"
 
