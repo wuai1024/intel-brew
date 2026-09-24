@@ -217,6 +217,7 @@ jobs:
           fi
 
           echo "FORMULA_VERSION=$FORMULA_VERSION" >> "$GITHUB_ENV"
+          printf '%s\n' "$FORMULA_VERSION" > dist/FORMULA_VERSION
 
           echo "=== SHA256 ==="
           (
@@ -249,11 +250,49 @@ jobs:
           brew test "$FORMULA"
           brew list --versions "$FORMULA"
 
+      - name: Upload validated bottle
+        uses: actions/upload-artifact@v4
+        with:
+          name: intel-bottle-${{ strategy.job-index }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish ${{ matrix.formula }} release
+    needs: build
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        formula: ${{ fromJSON(inputs.formulae) }}
+    env:
+      FORMULA: ${{ matrix.formula }}
+
+    steps:
+      - name: Download validated bottle
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: intel-bottle-${{ strategy.job-index }}
+          path: dist
+
+      - name: Report unavailable bottle
+        if: ${{ steps.download.outcome != 'success' }}
+        run: echo "No validated bottle was produced for $FORMULA; skipping release"
+
       - name: Create GitHub Release
+        if: ${{ steps.download.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+
+          FORMULA_VERSION="$(<dist/FORMULA_VERSION)"
+          rm dist/FORMULA_VERSION
 
           TAG="${FORMULA}-${FORMULA_VERSION}-x86_64-sequoia-build.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
           NOTES="Formula: ${FORMULA}
@@ -261,7 +300,7 @@ jobs:
           Platform: Intel x86_64 macOS 15 Sequoia
           Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-          for attempt in 1 2 3 4 5; do
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
             if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               if gh release upload "$TAG" dist/* \
                 --repo "$GITHUB_REPOSITORY" \
@@ -278,7 +317,7 @@ jobs:
               exit 0
             fi
 
-            if [[ "$attempt" -eq 5 ]]; then
+            if [[ "$attempt" -eq 10 ]]; then
               echo "Unable to create or update release after $attempt attempts" >&2
               exit 1
             fi
