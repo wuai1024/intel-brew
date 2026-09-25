@@ -65,6 +65,11 @@ jobs:
           })"
 
           while IFS= read -r dependency; do
+            if [[ "$FORMULA" == "rust" && "$dependency" == "llvm@22" ]]; then
+              echo "=== Rust will build its bundled LLVM to stay within the runner limit ==="
+              continue
+            fi
+
             case "$dependency" in
               go|rust)
                 continue
@@ -145,10 +150,29 @@ jobs:
             source = source.gsub(/^  depends_on "go" => :build\n/, "") if File.directory?("/private/tmp/intel-brew-go/bin")
             source = source.gsub(/^  depends_on "rust" => :build\n/, "") if File.directory?("/private/tmp/intel-brew-rust/bin")
             if File.basename(path) == "ruby.rb"
-              old = %q("#{versioned_opt_prefix}/lib/libruby.#{version.major_minor}.dylib")
-              replacement = %q("#{opt_prefix}/lib/libruby.#{version.major_minor}.dylib")
+              old = %q(    assert_includes MachO::Tools.dylibs(parser), "#{versioned_opt_prefix}/lib/libruby.#{version.major_minor}.dylib")
+              replacement = [
+                %q(    ruby_library_paths = [opt_prefix, versioned_opt_prefix].map do |prefix|),
+                %q(      "#{prefix}/lib/libruby.#{version.major_minor}.dylib"),
+                %q(    end),
+                %q(    assert (MachO::Tools.dylibs(parser) & ruby_library_paths).any?),
+              ].join("\n")
               patched = source.sub(old, replacement)
-              abort "Unable to patch the Ruby opt-prefix test" if patched == source
+              abort "Unable to patch the Ruby library-path test" if patched == source
+              source = patched
+            end
+            if File.basename(path) == "rust.rb"
+              patched = source.sub(/^  depends_on "llvm@22"\n/, "")
+              abort "Unable to remove Rust external LLVM dependency" if patched == source
+              source = patched
+
+              patched = source.sub("      --llvm-root=\#{llvm.opt_prefix}\n", "")
+              abort "Unable to enable Rust bundled LLVM" if patched == source
+              source = patched
+
+              external_objcopy = /^    # Replace the renamed llvm-objcopy.*?^    ln_sf llvm_objcopy\.relative_path_from\(rust_objcopy\.dirname\), rust_objcopy\n/m
+              patched = source.sub(external_objcopy, "")
+              abort "Unable to remove Rust external llvm-objcopy link" if patched == source
               source = patched
             end
             File.write(path, source)
