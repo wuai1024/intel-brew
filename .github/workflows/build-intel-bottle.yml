@@ -162,8 +162,9 @@ jobs:
               source = patched
             end
             if File.basename(path) == "rust.rb"
-              patched = source.sub(/^  depends_on "llvm@22"\n/, "")
-              abort "Unable to remove Rust external LLVM dependency" if patched == source
+              bundled_llvm_dependencies = "  depends_on \"cmake\" => :build\n  depends_on \"ninja\" => :build\n"
+              patched = source.sub(/^  depends_on "llvm@22"\n/, bundled_llvm_dependencies)
+              abort "Unable to replace Rust external LLVM dependency" if patched == source
               source = patched
 
               patched = source.sub("      --llvm-root=\#{llvm.opt_prefix}\n", "")
