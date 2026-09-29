@@ -175,6 +175,17 @@ jobs:
               patched = source.sub(external_objcopy, "")
               abort "Unable to remove Rust external llvm-objcopy link" if patched == source
               source = patched
+
+              cargo_test = %q(    assert_equal "Hello, world!", cd("hello_world") { shell_output("#{bin}/cargo run").split("\n").last })
+              explicit_rustc_test = [
+                %q(    hello_world = cd("hello_world") do),
+                %q(      with_env(RUSTC: bin/"rustc") { shell_output("#{bin}/cargo run").split("\n").last }),
+                %q(    end),
+                %q(    assert_equal "Hello, world!", hello_world),
+              ].join("\n")
+              patched = source.sub(cargo_test, explicit_rustc_test)
+              abort "Unable to make the Rust cargo test use the built compiler" if patched == source
+              source = patched
             end
             File.write(path, source)
           ' "$formula_file"
