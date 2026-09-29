@@ -77,8 +77,15 @@ jobs:
             esac
 
             if ! brew list --versions "$dependency" >/dev/null 2>&1; then
-              echo "=== Building missing dependency: $dependency ==="
-              brew install --build-from-source "$dependency"
+              echo "=== Installing missing dependency: $dependency ==="
+              if ! brew install "$dependency"; then
+                if brew list --versions "$dependency" >/dev/null 2>&1; then
+                  echo "::warning::Homebrew returned a non-zero status after installing $dependency; continuing because its keg is present"
+                else
+                  echo "Unable to install required dependency: $dependency" >&2
+                  exit 1
+                fi
+              fi
             fi
           done <<< "$formula_dependencies"
 
