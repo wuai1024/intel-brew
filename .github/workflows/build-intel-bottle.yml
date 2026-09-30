@@ -294,7 +294,7 @@ jobs:
           brew list --versions "$FORMULA"
 
       - name: Upload validated bottle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: intel-bottle-${{ strategy.job-index }}
           path: dist/*
@@ -318,7 +318,7 @@ jobs:
       - name: Download validated bottle
         id: download
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: intel-bottle-${{ strategy.job-index }}
           path: dist
