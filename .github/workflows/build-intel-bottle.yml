@@ -60,7 +60,11 @@ jobs:
 
           formula_dependencies="$({
             brew info --json=v2 --formula "$FORMULA" |
-              jq -r '(.formulae[0].dependencies + .formulae[0].build_dependencies)[]' |
+              jq -r '(
+                (.formulae[0].dependencies // []) +
+                (.formulae[0].build_dependencies // []) +
+                (.formulae[0].test_dependencies // [])
+              )[]' |
               sort -u
           })"
 
