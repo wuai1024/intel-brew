@@ -297,7 +297,15 @@ jobs:
           fi
 
           brew uninstall --force --ignore-dependencies --formula "$FORMULA"
-          brew install "${bottles[@]}"
+          if ! brew install "${bottles[@]}"; then
+            if brew list --versions "$FORMULA" >/dev/null 2>&1; then
+              echo "::warning::$FORMULA bottle was installed but could not be linked; overwriting conflicting runner links"
+              brew link --overwrite "$FORMULA"
+            else
+              echo "Unable to install the generated $FORMULA bottle" >&2
+              exit 1
+            fi
+          fi
           brew test "$FORMULA"
           brew list --versions "$FORMULA"
 
