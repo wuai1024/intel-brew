@@ -206,6 +206,14 @@ jobs:
               break
             fi
 
+            if brew list --versions "$FORMULA" >/dev/null 2>&1; then
+              echo "::warning::$FORMULA was built but could not be linked; overwriting conflicting runner links"
+              if brew link --overwrite "$FORMULA"; then
+                build_succeeded=true
+                break
+              fi
+            fi
+
             if [[ "$attempt" -lt 3 ]]; then
               echo "Build attempt $attempt failed; retrying the complete install" >&2
               sleep "$((attempt * 15))"
