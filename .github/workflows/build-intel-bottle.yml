@@ -241,7 +241,7 @@ jobs:
           fi
 
           formula_is_outdated() {
-            [[ -n "$(brew outdated --quiet --formula "$1" 2>/dev/null || true)" ]]
+            [[ -n "$(brew outdated --quiet --formula "$1" </dev/null 2>/dev/null || true)" ]]
           }
 
           patch_portable_toolchain_dependencies() {
@@ -250,7 +250,7 @@ jobs:
             formula_source="$({
               HOMEBREW_NO_INSTALL_FROM_API=1 brew ruby -e \
                 'puts Formulary.factory(ARGV.fetch(0)).path' \
-                "$dependency"
+                "$dependency" </dev/null
             })"
 
             ruby -e '
@@ -286,7 +286,7 @@ jobs:
             fi
 
             dependency_action=""
-            if ! brew list --versions "$dependency" >/dev/null 2>&1; then
+            if ! brew list --versions "$dependency" </dev/null >/dev/null 2>&1; then
               dependency_action=install
             elif formula_is_outdated "$dependency"; then
               dependency_action=upgrade
@@ -298,8 +298,10 @@ jobs:
 
             patch_portable_toolchain_dependencies "$dependency"
             echo "=== $dependency_action dependency: $dependency ==="
-            if ! HOMEBREW_NO_INSTALL_FROM_API=1 brew "$dependency_action" "$dependency"; then
-              if brew list --versions "$dependency" >/dev/null 2>&1 &&
+            # Homebrew subcommands may read stdin. Keep them away from the
+            # dependency list that feeds this while loop.
+            if ! HOMEBREW_NO_INSTALL_FROM_API=1 brew "$dependency_action" "$dependency" </dev/null; then
+              if brew list --versions "$dependency" </dev/null >/dev/null 2>&1 &&
                 ! formula_is_outdated "$dependency"; then
                 echo "::warning::Homebrew returned a non-zero status after updating $dependency; continuing because its current keg is present"
               else
