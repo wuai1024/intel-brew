@@ -3,26 +3,26 @@
 Builds unofficial Homebrew bottles on Intel (`x86_64`) macOS 15 Sequoia using
 GitHub-hosted Intel runners.
 
-The default build list contains locally used formulae that are outdated and do
-not currently have an official Intel bottle:
+The default build list is stored in
+[`.github/intel-bottles.json`](.github/intel-bottles.json). Edit its
+`formulae` array to change what a normal manual run builds; the Actions workflow
+does not need to be edited.
 
-- `aliyun-cli`
-- `ffmpeg`
-- `fribidi`
-- `libslirp`
-- `mysql@8.4`
-- `openjdk`
-- `redis`
-- `rsync`
-- `ruby`
-- `rust`
-- `snappy`
-- `uv`
-- `wget`
-- `xxhash`
+Formula-specific build behavior also lives in the configuration file under
+`options`. Supported options are:
 
-The workflow input accepts a JSON array, so a manual run can build a different
-set without changing the workflow file.
+- `force_toolchains`: expose the runner-provided `go` or `rust` toolchain;
+- `skip_dependencies`: do not install named Homebrew dependencies;
+- `patches`: enable a known formula-source patch;
+- `post_build`: run a known post-build repair before testing.
+
+The workflow detects transitive Go and Rust build dependencies automatically.
+It updates direct and test dependencies even when an older keg is already on
+the runner, which prevents formula tests from failing against stale packages.
+
+The optional workflow input still accepts a JSON array for a one-off subset.
+For example, `["certbot","harfbuzz"]` builds only those two formulae while
+retaining any matching options from the configuration file.
 
 ## Release process
 

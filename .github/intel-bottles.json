@@ -1,0 +1,35 @@
+{
+  "formulae": [
+    "python@3.14",
+    "python@3.13",
+    "pipx",
+    "python@3.12",
+    "certbot",
+    "libpng",
+    "harfbuzz",
+    "openssl@3",
+    "openjpeg",
+    "uv",
+    "gh"
+  ],
+  "options": {
+    "redis": {
+      "post_build": [
+        "redis_modules_executable"
+      ]
+    },
+    "ruby": {
+      "patches": [
+        "ruby_library_test"
+      ]
+    },
+    "rust": {
+      "skip_dependencies": [
+        "llvm@22"
+      ],
+      "patches": [
+        "rust_bundled_llvm"
+      ]
+    }
+  }
+}

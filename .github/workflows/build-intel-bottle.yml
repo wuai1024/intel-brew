@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       formulae:
-        description: JSON array of Homebrew formulae to build
-        required: true
-        default: '["aliyun-cli","ffmpeg","fribidi","libslirp","mysql@8.4","openjdk","redis","rsync","ruby","rust","snappy","uv","wget","xxhash"]'
+        description: Optional JSON array; empty uses .github/intel-bottles.json
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -24,15 +24,83 @@ env:
   HOMEBREW_NO_INSTALL_CLEANUP: "1"
 
 jobs:
+  prepare:
+    name: Load bottle configuration
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.config.outputs.matrix }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate and load configuration
+        id: config
+        env:
+          REQUESTED_FORMULAE: ${{ inputs.formulae }}
+        run: |
+          set -euo pipefail
+
+          config=.github/intel-bottles.json
+          jq -e '
+            (.formulae | type == "array") and
+            (.formulae | length > 0) and
+            (all(.formulae[]; type == "string" and length > 0)) and
+            ((.formulae | unique | length) == (.formulae | length)) and
+            ((.options // {}) | type == "object")
+          ' "$config" >/dev/null
+
+          if [[ -n "$REQUESTED_FORMULAE" ]]; then
+            jq -e '
+              type == "array" and
+              length > 0 and
+              all(.[]; type == "string" and length > 0) and
+              ((unique | length) == length)
+            ' <<< "$REQUESTED_FORMULAE" >/dev/null
+            formulae="$REQUESTED_FORMULAE"
+          else
+            formulae="$(jq -c '.formulae' "$config")"
+          fi
+
+          matrix="$({
+            jq -c --argjson formulae "$formulae" '
+              .options as $options |
+              [
+                $formulae[] as $formula |
+                ($options[$formula] // {}) as $option |
+                {
+                  formula: $formula,
+                  force_toolchains: (($option.force_toolchains // []) | join(",")),
+                  skip_dependencies: (($option.skip_dependencies // []) | join(",")),
+                  patches: (($option.patches // []) | join(",")),
+                  post_build: (($option.post_build // []) | join(","))
+                }
+              ]
+            ' "$config"
+          })"
+
+          if [[ "$(jq 'length' <<< "$matrix")" -eq 0 ]]; then
+            echo "Bottle build matrix is empty" >&2
+            exit 1
+          fi
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          jq . <<< "$matrix"
+
   build:
     name: Build ${{ matrix.formula }} for Intel macOS 15
+    needs: prepare
     runs-on: macos-15-intel
     strategy:
       fail-fast: false
       matrix:
-        formula: ${{ fromJSON(inputs.formulae) }}
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
       FORMULA: ${{ matrix.formula }}
+      FORCE_TOOLCHAINS: ${{ matrix.force_toolchains }}
+      SKIP_DEPENDENCIES: ${{ matrix.skip_dependencies }}
+      PATCHES: ${{ matrix.patches }}
+      POST_BUILD: ${{ matrix.post_build }}
 
     steps:
       - name: Show runner environment
@@ -58,6 +126,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          csv_has() {
+            local values="$1"
+            local expected="$2"
+            [[ ",${values}," == *",${expected},"* ]]
+          }
+
           formula_dependencies="$({
             brew info --json=v2 --formula "$FORMULA" |
               jq -r '(
@@ -68,49 +142,50 @@ jobs:
               sort -u
           })"
 
-          while IFS= read -r dependency; do
-            if [[ "$FORMULA" == "rust" && "$dependency" == "llvm@22" ]]; then
-              echo "=== Rust will build its bundled LLVM to stay within the runner limit ==="
-              continue
-            fi
+          recursive_dependencies="$({
+            HOMEBREW_NO_ENV_HINTS=1 brew deps \
+              --topological \
+              --include-build \
+              --include-test \
+              --formula \
+              "$FORMULA" |
+              awk 'NF && !seen[$0]++'
+          })"
 
-            case "$dependency" in
-              go|rust)
-                continue
-                ;;
-            esac
+          use_portable_go=false
+          if csv_has "$FORCE_TOOLCHAINS" go || grep -qx go <<< "$recursive_dependencies"; then
+            use_portable_go=true
+          fi
 
-            if ! brew list --versions "$dependency" >/dev/null 2>&1; then
-              echo "=== Installing missing dependency: $dependency ==="
-              if ! brew install "$dependency"; then
-                if brew list --versions "$dependency" >/dev/null 2>&1; then
-                  echo "::warning::Homebrew returned a non-zero status after installing $dependency; continuing because its keg is present"
-                else
-                  echo "Unable to install required dependency: $dependency" >&2
-                  exit 1
-                fi
-              fi
-            fi
-          done <<< "$formula_dependencies"
+          use_portable_rust=false
+          if csv_has "$FORCE_TOOLCHAINS" rust || grep -qx rust <<< "$recursive_dependencies"; then
+            use_portable_rust=true
+          fi
 
-          if grep -qx 'go' <<< "$formula_dependencies"; then
+          if [[ "$use_portable_go" == true ]]; then
             if ! command -v go >/dev/null 2>&1; then
-              brew install --build-from-source go
+              echo "The macOS runner does not provide the Go toolchain" >&2
+              exit 1
             fi
             go_root="$(go env GOROOT)"
             portable_go="/private/tmp/intel-brew-go"
             ditto "$go_root" "$portable_go"
             echo "$portable_go/bin" >> "$GITHUB_PATH"
+            echo "=== Portable Go ==="
+            "$portable_go/bin/go" version
           fi
 
-          if grep -qx 'rust' <<< "$formula_dependencies"; then
+          if [[ "$use_portable_rust" == true ]]; then
             if ! command -v rustc >/dev/null 2>&1; then
-              brew install --build-from-source rust
+              echo "The macOS runner does not provide the Rust toolchain" >&2
+              exit 1
             fi
             rust_root="$(rustc --print sysroot)"
             portable_rust="/private/tmp/intel-brew-rust"
             ditto "$rust_root" "$portable_rust"
             echo "$portable_rust/bin" >> "$GITHUB_PATH"
+            echo "=== Portable Rust ==="
+            "$portable_rust/bin/rustc" --version
           fi
 
           formula_installer="$(brew --repository)/Library/Homebrew/formula_installer.rb"
@@ -141,9 +216,113 @@ jobs:
             ' "$superenv"
           fi
 
+          recursive_formulae=()
+          while IFS= read -r dependency; do
+            [[ -n "$dependency" ]] && recursive_formulae+=("$dependency")
+          done <<< "$recursive_dependencies"
+
+          portable_dependency_names=""
+          if [[ ${#recursive_formulae[@]} -gt 0 ]]; then
+            dependency_metadata="$({
+              brew info --json=v2 --formula "${recursive_formulae[@]}"
+            })"
+            portable_dependency_names="$({
+              jq -r \
+                --argjson use_go "$use_portable_go" \
+                --argjson use_rust "$use_portable_rust" '
+                  .formulae[] |
+                  select(
+                    ($use_go and ((.build_dependencies // []) | index("go"))) or
+                    ($use_rust and ((.build_dependencies // []) | index("rust")))
+                  ) |
+                  .name
+                ' <<< "$dependency_metadata"
+            })"
+          fi
+
+          formula_is_outdated() {
+            [[ -n "$(brew outdated --quiet --formula "$1" 2>/dev/null || true)" ]]
+          }
+
+          patch_portable_toolchain_dependencies() {
+            local dependency="$1"
+            local formula_source
+            formula_source="$({
+              HOMEBREW_NO_INSTALL_FROM_API=1 brew ruby -e \
+                'puts Formulary.factory(ARGV.fetch(0)).path' \
+                "$dependency"
+            })"
+
+            ruby -e '
+              formula_source = ARGV.fetch(0)
+              source = File.read(formula_source)
+              portable_go = File.directory?("/private/tmp/intel-brew-go/bin")
+              portable_rust = File.directory?("/private/tmp/intel-brew-rust/bin")
+              patched = source.lines.reject do |line|
+                (portable_go && line.match?(/^  depends_on "go" => .*:build/)) ||
+                  (portable_rust && line.match?(/^  depends_on "rust" => .*:build/))
+              end.join
+              File.write(formula_source, patched) if patched != source
+            ' "$formula_source"
+          }
+
+          while IFS= read -r dependency; do
+            [[ -z "$dependency" ]] && continue
+
+            if csv_has "$SKIP_DEPENDENCIES" "$dependency"; then
+              echo "=== Skipping configured dependency: $dependency ==="
+              continue
+            fi
+
+            case "$dependency" in
+              go|rust)
+                continue
+                ;;
+            esac
+
+            if ! grep -qx "$dependency" <<< "$formula_dependencies" &&
+              ! grep -qx "$dependency" <<< "$portable_dependency_names"; then
+              continue
+            fi
+
+            dependency_action=""
+            if ! brew list --versions "$dependency" >/dev/null 2>&1; then
+              dependency_action=install
+            elif formula_is_outdated "$dependency"; then
+              dependency_action=upgrade
+            fi
+
+            if [[ -z "$dependency_action" ]]; then
+              continue
+            fi
+
+            patch_portable_toolchain_dependencies "$dependency"
+            echo "=== $dependency_action dependency: $dependency ==="
+            if ! HOMEBREW_NO_INSTALL_FROM_API=1 brew "$dependency_action" "$dependency"; then
+              if brew list --versions "$dependency" >/dev/null 2>&1 &&
+                ! formula_is_outdated "$dependency"; then
+                echo "::warning::Homebrew returned a non-zero status after updating $dependency; continuing because its current keg is present"
+              else
+                echo "Unable to $dependency_action required dependency: $dependency" >&2
+                exit 1
+              fi
+            fi
+
+            if formula_is_outdated "$dependency"; then
+              echo "Required dependency is still outdated after $dependency_action: $dependency" >&2
+              exit 1
+            fi
+          done <<< "$recursive_dependencies"
+
       - name: Build ${{ matrix.formula }} from source
         run: |
           set -euo pipefail
+
+          csv_has() {
+            local values="$1"
+            local expected="$2"
+            [[ ",${values}," == *",${expected},"* ]]
+          }
 
           if brew list --formula "$FORMULA" >/dev/null 2>&1; then
             brew uninstall --force --ignore-dependencies --formula "$FORMULA"
@@ -160,7 +339,8 @@ jobs:
             source = File.read(path)
             source = source.gsub(/^  depends_on "go" => :build\n/, "") if File.directory?("/private/tmp/intel-brew-go/bin")
             source = source.gsub(/^  depends_on "rust" => :build\n/, "") if File.directory?("/private/tmp/intel-brew-rust/bin")
-            if File.basename(path) == "ruby.rb"
+            patches = ENV.fetch("PATCHES", "").split(",")
+            if patches.include?("ruby_library_test")
               old = %q(    assert_includes MachO::Tools.dylibs(parser), "#{versioned_opt_prefix}/lib/libruby.#{version.major_minor}.dylib")
               replacement = [
                 %q(    ruby_library_paths = [opt_prefix, versioned_opt_prefix].map do |prefix|),
@@ -172,7 +352,7 @@ jobs:
               abort "Unable to patch the Ruby library-path test" if patched == source
               source = patched
             end
-            if File.basename(path) == "rust.rb"
+            if patches.include?("rust_bundled_llvm")
               bundled_llvm_dependencies = "  depends_on \"cmake\" => :build\n  depends_on \"ninja\" => :build\n"
               patched = source.sub(/^  depends_on "llvm@22"\n/, bundled_llvm_dependencies)
               abort "Unable to replace Rust external LLVM dependency" if patched == source
@@ -229,7 +409,7 @@ jobs:
             exit 1
           fi
 
-          if [[ "$FORMULA" == "redis" ]]; then
+          if csv_has "$POST_BUILD" redis_modules_executable; then
             chmod +x "$(brew --prefix "$FORMULA")"/lib/redis/modules/*.so
           fi
 
@@ -323,14 +503,16 @@ jobs:
 
   publish:
     name: Publish ${{ matrix.formula }} release
-    needs: build
-    if: ${{ always() }}
+    needs:
+      - prepare
+      - build
+    if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        formula: ${{ fromJSON(inputs.formulae) }}
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
       FORMULA: ${{ matrix.formula }}
 
@@ -345,7 +527,9 @@ jobs:
 
       - name: Report unavailable bottle
         if: ${{ steps.download.outcome != 'success' }}
-        run: echo "No validated bottle was produced for $FORMULA; skipping release"
+        run: |
+          echo "No validated bottle was produced for $FORMULA" >&2
+          exit 1
 
       - name: Create GitHub Release
         if: ${{ steps.download.outcome == 'success' }}
