@@ -135,7 +135,7 @@ jobs:
           }
 
           recursive_dependencies="$({
-            HOMEBREW_NO_ENV_HINTS=1 brew deps \
+            HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew deps \
               --topological \
               --include-build \
               --include-test \
@@ -322,7 +322,8 @@ jobs:
               brew uninstall --force --ignore-dependencies --formula "$dependency" </dev/null
             fi
 
-            if ! HOMEBREW_NO_INSTALL_FROM_API=1 brew install "${bottles[0]}" </dev/null; then
+            if ! HOMEBREW_DEVELOPER=1 HOMEBREW_NO_INSTALL_FROM_API=1 \
+              brew install "${bottles[0]}" </dev/null; then
               if formula_has_expected_keg "$dependency" "$expected_version"; then
                 echo "::warning::$dependency bottle installed but runner links conflicted; repairing managed paths"
                 brew link --overwrite "$dependency" </dev/null || true
@@ -359,6 +360,37 @@ jobs:
               File.write(formula_source, patched) if patched != source
             ' "$formula_source"
           }
+
+          # The first dependency graph is only used to discover which runner
+          # toolchains are needed. Remove those build-only dependency edges
+          # from every formula in that graph, then calculate the real graph
+          # again. Otherwise descendants used only to build Homebrew's rust or
+          # go formula (for example llvm) would still be built unnecessarily.
+          initial_recursive_dependencies="$recursive_dependencies"
+          patch_portable_toolchain_dependencies "$FORMULA"
+          while IFS= read -r dependency; do
+            [[ -z "$dependency" ]] && continue
+            patch_portable_toolchain_dependencies "$dependency"
+          done <<< "$initial_recursive_dependencies"
+
+          recursive_dependencies="$({
+            HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew deps \
+              --topological \
+              --include-build \
+              --include-test \
+              --formula \
+              "$FORMULA" |
+              awk 'NF && !seen[$0]++'
+          })"
+
+          if [[ "$use_portable_go" == true ]] && grep -qx go <<< "$recursive_dependencies"; then
+            echo "Portable Go replacement did not remove the Homebrew go dependency" >&2
+            exit 1
+          fi
+          if [[ "$use_portable_rust" == true ]] && grep -qx rust <<< "$recursive_dependencies"; then
+            echo "Portable Rust replacement did not remove the Homebrew rust dependency" >&2
+            exit 1
+          fi
 
           release_index=/private/tmp/intel-brew-releases.json
           if ! gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
