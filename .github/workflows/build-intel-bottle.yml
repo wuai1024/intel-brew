@@ -123,6 +123,8 @@ jobs:
           brew update
 
       - name: Prepare dependencies and runner toolchains
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -131,16 +133,6 @@ jobs:
             local expected="$2"
             [[ ",${values}," == *",${expected},"* ]]
           }
-
-          formula_dependencies="$({
-            brew info --json=v2 --formula "$FORMULA" |
-              jq -r '(
-                (.formulae[0].dependencies // []) +
-                (.formulae[0].build_dependencies // []) +
-                (.formulae[0].test_dependencies // [])
-              )[]' |
-              sort -u
-          })"
 
           recursive_dependencies="$({
             HOMEBREW_NO_ENV_HINTS=1 brew deps \
@@ -216,32 +208,134 @@ jobs:
             ' "$superenv"
           fi
 
-          recursive_formulae=()
-          while IFS= read -r dependency; do
-            [[ -n "$dependency" ]] && recursive_formulae+=("$dependency")
-          done <<< "$recursive_dependencies"
+          formula_expected_version() {
+            HOMEBREW_NO_INSTALL_FROM_API=1 brew ruby -e \
+              'puts Formulary.factory(ARGV.fetch(0)).pkg_version' \
+              "$1" </dev/null
+          }
 
-          portable_dependency_names=""
-          if [[ ${#recursive_formulae[@]} -gt 0 ]]; then
-            dependency_metadata="$({
-              brew info --json=v2 --formula "${recursive_formulae[@]}"
-            })"
-            portable_dependency_names="$({
-              jq -r \
-                --argjson use_go "$use_portable_go" \
-                --argjson use_rust "$use_portable_rust" '
-                  .formulae[] |
-                  select(
-                    ($use_go and ((.build_dependencies // []) | index("go"))) or
-                    ($use_rust and ((.build_dependencies // []) | index("rust")))
-                  ) |
-                  .name
-                ' <<< "$dependency_metadata"
-            })"
-          fi
+          formula_has_expected_keg() {
+            local dependency="$1"
+            local expected_version="$2"
+            brew list --versions "$dependency" </dev/null 2>/dev/null |
+              awk '{$1=""; sub(/^ /, ""); for (i = 1; i <= NF; i++) print $i}' |
+              grep -Fqx "$expected_version"
+          }
 
-          formula_is_outdated() {
-            [[ -n "$(brew outdated --quiet --formula "$1" </dev/null 2>/dev/null || true)" ]]
+          formula_installed_prefix() {
+            local dependency="$1"
+            local expected_version="$2"
+            printf '%s/%s\n' "$(brew --cellar "$dependency")" "$expected_version"
+          }
+
+          formula_opt_prefix() {
+            HOMEBREW_NO_INSTALL_FROM_API=1 brew ruby -e \
+              'puts Formulary.factory(ARGV.fetch(0)).opt_prefix' \
+              "$1" </dev/null
+          }
+
+          repair_formula_paths() {
+            local dependency="$1"
+            local expected_version="$2"
+            local installed_prefix
+            local opt_prefix
+            installed_prefix="$(formula_installed_prefix "$dependency" "$expected_version")"
+            opt_prefix="$(formula_opt_prefix "$dependency")"
+
+            if [[ ! -d "$installed_prefix" ]]; then
+              echo "Expected keg is missing for $dependency: $installed_prefix" >&2
+              return 1
+            fi
+
+            if [[ ! -L "$opt_prefix" ]] ||
+              [[ "$(realpath "$opt_prefix" 2>/dev/null || true)" != "$installed_prefix" ]]; then
+              echo "=== Repairing opt link: $opt_prefix -> $installed_prefix ==="
+              mkdir -p "$(dirname "$opt_prefix")"
+              ln -sfn "$installed_prefix" "$opt_prefix"
+            fi
+
+            if [[ "$dependency" == python@* ]]; then
+              local python_executable="$opt_prefix/libexec/bin/python"
+              if [[ ! -x "$python_executable" ]]; then
+                echo "Python executable is missing for $dependency: $python_executable" >&2
+                return 1
+              fi
+              "$python_executable" -m pip --version
+            fi
+
+            HOMEBREW_NO_INSTALL_FROM_API=1 brew linkage --test "$dependency"
+          }
+
+          install_released_dependency_bottle() {
+            local dependency="$1"
+            local expected_version="$2"
+            local tag_prefix="${dependency}-${expected_version}-x86_64-sequoia-build."
+            local release_tag
+            local safe_dependency
+            local download_dir
+            local bottles
+
+            release_tag="$({
+              jq -r --arg prefix "$tag_prefix" '
+                [
+                  .[] |
+                  select(.draft == false and .prerelease == false) |
+                  select(.tag_name | startswith($prefix)) |
+                  select(any(.assets[]?; .name == "SHA256SUMS")) |
+                  select(any(.assets[]?; .name | (contains(".bottle") and endswith(".tar.gz"))))
+                ] |
+                first |
+                .tag_name // empty
+              ' "$release_index"
+            })"
+            [[ -n "$release_tag" ]] || return 1
+
+            safe_dependency="${dependency//[^[:alnum:]_.@-]/_}"
+            download_dir="$(mktemp -d "/private/tmp/intel-brew-${safe_dependency}.XXXXXX")"
+            echo "=== Reusing validated dependency bottle: $release_tag ==="
+            if ! gh release download "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern 'SHA256SUMS' \
+              --pattern '*.bottle*.tar.gz' \
+              --dir "$download_dir"; then
+              echo "::warning::Unable to download dependency bottle $release_tag; falling back to source"
+              rm -rf -- "$download_dir"
+              return 1
+            fi
+
+            if ! (cd "$download_dir" && shasum -a 256 -c SHA256SUMS); then
+              echo "Checksum validation failed for dependency bottle $release_tag" >&2
+              rm -rf -- "$download_dir"
+              return 1
+            fi
+
+            shopt -s nullglob
+            bottles=("$download_dir"/*.bottle*.tar.gz)
+            shopt -u nullglob
+            if [[ ${#bottles[@]} -ne 1 ]]; then
+              echo "Expected exactly one bottle in $release_tag, found ${#bottles[@]}" >&2
+              rm -rf -- "$download_dir"
+              return 1
+            fi
+
+            if brew list --versions "$dependency" </dev/null >/dev/null 2>&1; then
+              brew uninstall --force --ignore-dependencies --formula "$dependency" </dev/null
+            fi
+
+            if ! HOMEBREW_NO_INSTALL_FROM_API=1 brew install "${bottles[0]}" </dev/null; then
+              if formula_has_expected_keg "$dependency" "$expected_version"; then
+                echo "::warning::$dependency bottle installed but runner links conflicted; repairing managed paths"
+                brew link --overwrite "$dependency" </dev/null || true
+              else
+                echo "Unable to install dependency bottle $release_tag" >&2
+                rm -rf -- "$download_dir"
+                return 1
+              fi
+            fi
+
+            rm -rf -- "$download_dir"
+            formula_has_expected_keg "$dependency" "$expected_version" &&
+              repair_formula_paths "$dependency" "$expected_version"
           }
 
           patch_portable_toolchain_dependencies() {
@@ -266,6 +360,17 @@ jobs:
             ' "$formula_source"
           }
 
+          release_index=/private/tmp/intel-brew-releases.json
+          if ! gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+            jq -s 'add | sort_by(.published_at // "") | reverse' > "$release_index"; then
+            echo "Unable to read dependency bottle releases" >&2
+            exit 1
+          fi
+
+          # Resolve every recursive dependency in Homebrew's topological order.
+          # Prefer an exact, checksum-verified bottle previously published by
+          # this repository; only fall back to a source build when none exists.
+
           while IFS= read -r dependency; do
             [[ -z "$dependency" ]] && continue
 
@@ -280,40 +385,42 @@ jobs:
                 ;;
             esac
 
-            if ! grep -qx "$dependency" <<< "$formula_dependencies" &&
-              ! grep -qx "$dependency" <<< "$portable_dependency_names"; then
-              continue
-            fi
-
-            dependency_action=""
-            if ! brew list --versions "$dependency" </dev/null >/dev/null 2>&1; then
-              dependency_action=install
-            elif formula_is_outdated "$dependency"; then
-              dependency_action=upgrade
-            fi
-
-            if [[ -z "$dependency_action" ]]; then
+            expected_version="$(formula_expected_version "$dependency")"
+            if formula_has_expected_keg "$dependency" "$expected_version"; then
+              echo "=== Validating existing dependency: $dependency $expected_version ==="
+              repair_formula_paths "$dependency" "$expected_version"
               continue
             fi
 
             patch_portable_toolchain_dependencies "$dependency"
+            if install_released_dependency_bottle "$dependency" "$expected_version"; then
+              continue
+            fi
+
+            dependency_action=install
+            if brew list --versions "$dependency" </dev/null >/dev/null 2>&1; then
+              dependency_action=upgrade
+            fi
+
             echo "=== $dependency_action dependency: $dependency ==="
             # Homebrew subcommands may read stdin. Keep them away from the
             # dependency list that feeds this while loop.
             if ! HOMEBREW_NO_INSTALL_FROM_API=1 brew "$dependency_action" "$dependency" </dev/null; then
-              if brew list --versions "$dependency" </dev/null >/dev/null 2>&1 &&
-                ! formula_is_outdated "$dependency"; then
-                echo "::warning::Homebrew returned a non-zero status after updating $dependency; continuing because its current keg is present"
+              if formula_has_expected_keg "$dependency" "$expected_version"; then
+                echo "::warning::Homebrew returned a non-zero status after updating $dependency; repairing runner link conflicts"
+                brew link --overwrite "$dependency" </dev/null || true
               else
                 echo "Unable to $dependency_action required dependency: $dependency" >&2
                 exit 1
               fi
             fi
 
-            if formula_is_outdated "$dependency"; then
-              echo "Required dependency is still outdated after $dependency_action: $dependency" >&2
+            if ! formula_has_expected_keg "$dependency" "$expected_version"; then
+              echo "Required dependency has the wrong version after $dependency_action: $dependency (expected $expected_version)" >&2
               exit 1
             fi
+
+            repair_formula_paths "$dependency" "$expected_version"
           done <<< "$recursive_dependencies"
 
       - name: Build ${{ matrix.formula }} from source
