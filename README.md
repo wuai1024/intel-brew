@@ -8,6 +8,12 @@ The default build list is stored in
 `formulae` array to change what a normal manual run builds; the Actions workflow
 does not need to be edited.
 
+The current build selection comes from the
+[2026-10-28 local update inventory](docs/build-requests/2026-10-28.md):
+62 outdated Intel formulae that need source builds, including locally pinned
+`uv`. The inventory records observed versions; each job builds the current
+Homebrew recipe when it starts.
+
 Formula-specific build behavior also lives in the configuration file under
 `options`. Supported options are:
 
